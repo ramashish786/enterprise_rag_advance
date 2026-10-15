@@ -30,9 +30,6 @@ venv/
 *.swo
 *~
 
-# Claude Code (per-machine, not shared settings.json)
-.claude/settings.local.json
-
 # Node
 node_modules/
 dist/
@@ -43,5 +40,9 @@ Thumbs.db
 
 # Uploads
 backend/uploads/
+
+# Docs (intentionally untracked)
 docs/
+
+# Claude Code
 .claude/
