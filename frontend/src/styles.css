@@ -65,6 +65,11 @@ button.primary {
   border: none; border-radius: 6px; cursor: pointer;
 }
 button.primary:hover { background: var(--accent-hover); }
+button.secondary {
+  padding: 8px; background: var(--card); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+}
+button.secondary:hover { background: var(--bg); }
 .sessions {
   list-style: none; margin: 0; padding: 0; overflow-y: auto;
   flex: 1;
@@ -149,3 +154,35 @@ code {
   border: none; border-radius: 6px; cursor: pointer;
 }
 .composer button:disabled { background: var(--muted); cursor: not-allowed; }
+
+/* Approvals */
+.approvals-page { max-width: 720px; margin: 0 auto; padding: 24px; }
+.approvals-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+}
+.approvals-header h1 { font-size: 18px; margin: 0; }
+.approvals-header div { display: flex; gap: 8px; }
+.approvals-header button {
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); cursor: pointer;
+}
+.approvals-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.approval-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+}
+.approval-type { font-weight: 600; margin-bottom: 8px; }
+.approval-args { list-style: none; margin: 0 0 8px; padding: 0; font-size: 13px; }
+.approval-args li { margin-bottom: 2px; }
+.approval-card input {
+  width: 100%; padding: 8px; margin: 8px 0; border: 1px solid var(--border);
+  border-radius: 6px; font: inherit;
+}
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button {
+  padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; color: white;
+}
+.approval-actions button:first-child { background: var(--accent); }
+.approval-actions button:first-child:hover { background: var(--accent-hover); }
+.approval-actions button:last-child { background: var(--error); }
+.approval-actions button:last-child:hover { background: #b91c1c; }
+.approval-actions button:disabled { background: var(--muted); cursor: not-allowed; }

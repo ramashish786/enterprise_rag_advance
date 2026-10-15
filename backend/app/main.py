@@ -6,6 +6,7 @@ domain exceptions to HTTP responses.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -13,8 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import structlog
 
+from app.agent.checkpointer import dispose_checkpointer, setup_checkpointer
 from app.api import (
     admin_routes,
+    approval_routes,
     auth_routes,
     chat_routes,
     document_routes,
@@ -23,6 +26,15 @@ from app.api import (
 from app.core.config import settings
 from app.core.exceptions import InsuranceAgentError
 from app.core.logging import configure_logging, get_logger
+from app.db.session import dispose_engines
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    await setup_checkpointer()
+    yield
+    await dispose_checkpointer()
+    await dispose_engines()
 
 
 def create_app() -> FastAPI:
@@ -34,6 +46,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=_lifespan,
     )
 
     app.add_middleware(
@@ -74,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(document_routes.router)
     app.include_router(admin_routes.router)
     app.include_router(policy_routes.router)
+    app.include_router(approval_routes.router)
 
     @app.get("/health")
     async def health():

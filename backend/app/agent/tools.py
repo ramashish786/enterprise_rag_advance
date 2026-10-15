@@ -11,15 +11,18 @@ behavior.
 """
 from __future__ import annotations
 
+from decimal import Decimal
+from datetime import date
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import SecurityPrincipal
 from app.core.logging import get_logger
-from app.db.models import Claim, DocumentChunk, InsurancePolicy, User
+from app.db.models import Claim, DocumentChunk, InsurancePolicy, PolicyStatus, User
 from app.memory.long_term import LongTermMemoryService
 from app.rag.retriever import ChunkRecord, HybridRetriever, RetrievedChunk
 from app.rag.reranker import get_reranker
@@ -51,7 +54,28 @@ TOOL_DESCRIPTIONS = {
         "Recall the user's stored long-term memories (preferences, facts). "
         "Only ever accesses memories belonging to the authenticated user."
     ),
+    "file_claim": (
+        "File an insurance claim against one of the authenticated user's own "
+        "policies. Requires policy_number, amount, and description. Mutating: "
+        "claims above the auto-approve threshold pause for employee/admin "
+        "approval before the claim is created."
+    ),
+    "request_policy_cancellation": (
+        "Request cancellation of one of the authenticated user's own policies. "
+        "Requires policy_number and reason. Mutating: always pauses for "
+        "employee/admin approval before the policy is cancelled."
+    ),
+    "request_policy_change": (
+        "Request a coverage-amount change on one of the authenticated user's "
+        "own policies. Requires policy_number, new_coverage_amount, and reason. "
+        "Mutating: always pauses for employee/admin approval before the change "
+        "is applied."
+    ),
 }
+
+# Tools that mutate data rather than just read it. The graph routes these
+# through a prepare/approve/apply sequence instead of straight to synthesis.
+MUTATING_TOOLS = frozenset({"file_claim", "request_policy_cancellation", "request_policy_change"})
 
 
 # --- get_my_policies ---
@@ -181,6 +205,105 @@ async def recall_long_term_memory(
         "content": m.content,
         "memory_type": m.memory_type.value,
     } for m in memories]
+
+
+# --- file_claim ---
+#
+# Mutating. `idempotency_key` is a deterministic hash computed once by
+# node_prepare_mutating_action from state that's already checkpointed (thread
+# id, action type, tool args) — so if this node re-executes after a crash and
+# resume, it recomputes the same key rather than a fresh one. The unique
+# constraint on Claim.dedupe_key is the actual guard: a second insert attempt
+# with the same key hits IntegrityError and we return the row that already
+# exists instead of creating a duplicate.
+
+@authorize_tool(("claim", "file"))
+async def file_claim(
+    principal: SecurityPrincipal, session: AsyncSession, *,
+    policy_number: str, amount: float, description: str, idempotency_key: str,
+) -> dict[str, Any]:
+    policy = await get_policy_by_number(principal, session, policy_number)
+    if not policy:
+        return {"error": f"no accessible policy {policy_number!r}"}
+
+    existing = (await session.execute(
+        select(Claim).where(Claim.dedupe_key == idempotency_key)
+    )).scalar_one_or_none()
+    if existing:
+        return _claim_to_dict(existing)
+
+    claim = Claim(
+        claim_number=f"CLM-{uuid4().hex[:10].upper()}",
+        policy_id=UUID(policy["id"]),
+        filed_date=date.today(),
+        amount=Decimal(str(amount)),
+        status="open",
+        description=description,
+        dedupe_key=idempotency_key,
+    )
+    session.add(claim)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = (await session.execute(
+            select(Claim).where(Claim.dedupe_key == idempotency_key)
+        )).scalar_one()
+        return _claim_to_dict(existing)
+    await session.refresh(claim)
+    return _claim_to_dict(claim)
+
+
+# --- request_policy_cancellation / request_policy_change ---
+#
+# Unlike file_claim these are UPDATEs, not INSERTs: replaying either one after
+# a crash-and-resume lands on the same end state, so there's no duplicate-row
+# risk and no dedupe_key check needed here. idempotency_key is still accepted
+# (for a uniform call signature from apply_mutating_action) and is what
+# PendingApproval.idempotency_key dedupes on, to avoid two separate approval
+# requests for the same duplicate submission.
+
+@authorize_tool(("policy", "request_cancellation"))
+async def request_policy_cancellation(
+    principal: SecurityPrincipal, session: AsyncSession, *,
+    policy_number: str, reason: str, idempotency_key: str,
+) -> dict[str, Any]:
+    policy = await get_policy_by_number(principal, session, policy_number)
+    if not policy:
+        return {"error": f"no accessible policy {policy_number!r}"}
+
+    row = (await session.execute(
+        select(InsurancePolicy).where(InsurancePolicy.id == UUID(policy["id"]))
+    )).scalar_one()
+    row.status = PolicyStatus.CANCELLED
+    await session.commit()
+    await session.refresh(row)
+    return _policy_to_dict(row)
+
+
+@authorize_tool(("policy", "request_change"))
+async def request_policy_change(
+    principal: SecurityPrincipal, session: AsyncSession, *,
+    policy_number: str, new_coverage_amount: float, reason: str, idempotency_key: str,
+) -> dict[str, Any]:
+    policy = await get_policy_by_number(principal, session, policy_number)
+    if not policy:
+        return {"error": f"no accessible policy {policy_number!r}"}
+
+    row = (await session.execute(
+        select(InsurancePolicy).where(InsurancePolicy.id == UUID(policy["id"]))
+    )).scalar_one()
+    row.coverage_amount = Decimal(str(new_coverage_amount))
+    await session.commit()
+    await session.refresh(row)
+    return _policy_to_dict(row)
+
+
+MUTATING_TOOL_REGISTRY = {
+    "file_claim": file_claim,
+    "request_policy_cancellation": request_policy_cancellation,
+    "request_policy_change": request_policy_change,
+}
 
 
 # --- Serialization helpers ---

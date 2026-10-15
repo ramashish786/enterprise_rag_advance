@@ -70,6 +70,12 @@ class MemoryType(str, PyEnum):
     CONTEXT = "context"
 
 
+class ApprovalStatus(str, PyEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 # --- Identity & access ---
 
 class User(Base, TimestampMixin):
@@ -195,6 +201,10 @@ class Claim(Base, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)  # open / approved / denied / settled
     description: Mapped[str] = mapped_column(Text, default="")
+    # Idempotency guard for file_claim: a deterministic hash of (thread_id,
+    # action_type, tool_args), so a node re-executed after a crash-and-resume
+    # hits this unique constraint instead of creating a second claim.
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True)
 
     policy: Mapped[InsurancePolicy] = relationship(back_populates="claims")
 
@@ -225,6 +235,36 @@ class ChatMessage(Base, TimestampMixin):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONType, default=dict)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
+# --- Human-in-the-loop approvals ---
+
+class PendingApproval(Base, TimestampMixin):
+    """Queryable approval inbox for actions gated behind human sign-off.
+
+    For graph-driven actions (file_claim, request_policy_cancellation,
+    request_policy_change), `thread_id` is the ChatSession id the LangGraph
+    checkpointer paused on; resolving the row resumes that graph via
+    Command(resume=...). Document deletion doesn't go through the graph at
+    all (see document_routes.py) but reuses this table so there's one
+    approval inbox rather than two.
+    """
+    __tablename__ = "pending_approvals"
+
+    id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=new_uuid)
+    thread_id: Mapped[Optional[UUID]] = mapped_column(GUID)
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    args: Mapped[dict] = mapped_column(JSONType, default=dict)
+    # Hash of (thread_id/resource, action_type, args) — prevents two separate
+    # pending rows from the same duplicate submission (see app/agent/tools.py).
+    idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    requested_by: Mapped[UUID] = mapped_column(GUID, ForeignKey("users.id"), nullable=False)
+    status: Mapped[ApprovalStatus] = mapped_column(
+        SAEnum(ApprovalStatus, name="approval_status"), nullable=False, default=ApprovalStatus.PENDING
+    )
+    approver_id: Mapped[Optional[UUID]] = mapped_column(GUID, ForeignKey("users.id"))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text)
 
 
 # --- Long-term memory ---

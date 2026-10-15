@@ -75,6 +75,11 @@ export const api = {
   listMessages: (sessionId) => request(`/api/chat/sessions/${sessionId}/messages`),
   listPolicies: () => request('/api/policies'),
 
+  listApprovals: (status = 'pending') => request(`/api/approvals?status_filter=${status}`),
+  decideApproval: (approvalId, decision, note) => request(`/api/approvals/${approvalId}/decision`, {
+    method: 'POST', body: JSON.stringify({ decision, note }),
+  }),
+
   // SSE stream for chat. Returns EventSource-like async iterator over events.
   streamMessage: async function* (sessionId, content) {
     const res = await authFetch(`/api/chat/sessions/${sessionId}/messages`, {

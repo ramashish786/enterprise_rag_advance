@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     rerank_top_k: int = 5
     reranker_enabled: bool = True
 
+    # --- Agent / approvals ---
+    # Claims at or below this amount apply immediately; above it, filing
+    # pauses for employee/admin approval via the graph's interrupt() gate.
+    claim_auto_approve_threshold: float = 10_000.0
+
     # --- Observability ---
     langsmith_api_key: str = ""
     langsmith_project: str = "insurance-agent"
@@ -71,6 +76,15 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def checkpoint_database_url(self) -> str:
+        """Plain (non-asyncpg) DSN for psycopg, which the checkpointer uses
+        instead of the app's SQLAlchemy engine."""
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

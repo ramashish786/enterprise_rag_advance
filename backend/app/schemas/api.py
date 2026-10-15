@@ -92,3 +92,23 @@ class PolicyOut(BaseModel):
     start_date: str
     end_date: str
     status: str
+
+
+# --- Approvals ---
+
+class PendingApprovalOut(BaseModel):
+    id: UUID
+    thread_id: Optional[UUID]
+    action_type: str
+    args: dict
+    status: str
+    requested_by: UUID
+    approver_id: Optional[UUID]
+    created_at: datetime
+    resolved_at: Optional[datetime]
+    resolution_note: Optional[str]
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: Optional[str] = Field(default=None, max_length=2000)

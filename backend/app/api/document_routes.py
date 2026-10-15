@@ -1,18 +1,27 @@
-"""Document routes (admin): upload, list, delete."""
+"""Document routes (admin): upload, list, delete.
+
+Deletion is two-step and requires a different administrator to confirm
+(see request_document_deletion / approval_routes.py's decide_approval) —
+unlike the claim/cancellation/change flows this isn't graph-driven, since
+document management isn't something customers trigger via chat.
+"""
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import _db_session, require_permission
 from app.audit.service import AuditLogService
 from app.auth.service import SecurityPrincipal
-from app.db.models import Document, DocumentStatus, DocumentVisibility
+from app.db.models import Document, DocumentStatus, DocumentVisibility, PendingApproval
 from app.rag.ingestion import process_document, register_document
 from app.schemas.api import DocumentOut
 
@@ -87,19 +96,47 @@ async def list_documents(
     ]
 
 
-@router.delete("/{document_id}")
-async def delete_document(
+@router.post("/{document_id}/request-deletion")
+async def request_document_deletion(
     document_id: UUID,
+    reason: str = Form(""),
     principal: SecurityPrincipal = Depends(require_permission("document", "delete")),
     session: AsyncSession = Depends(_db_session),
 ):
+    """Creates a pending approval instead of deleting anything. The actual
+    delete happens in approval_routes.decide_approval, and only if the
+    confirming admin is a different user (four-eyes)."""
     doc = (await session.execute(select(Document).where(Document.id == document_id))).scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    await session.delete(doc)
-    await session.commit()
-    await AuditLogService(session).log(
-        event_type="document.deleted", action="delete", outcome="success",
-        user_id=principal.user_id, resource_type="document", resource_id=str(document_id),
+
+    args = {"document_id": str(document_id), "filename": doc.filename, "reason": reason}
+    idempotency_key = hashlib.sha256(
+        json.dumps({"action_type": "document_deletion", "args": args}, sort_keys=True).encode()
+    ).hexdigest()
+
+    existing = (await session.execute(
+        select(PendingApproval).where(PendingApproval.idempotency_key == idempotency_key)
+    )).scalar_one_or_none()
+    if existing:
+        return {"approval_id": str(existing.id), "status": existing.status.value}
+
+    approval = PendingApproval(
+        action_type="document_deletion", args=args,
+        idempotency_key=idempotency_key, requested_by=principal.user_id,
     )
-    return {"ok": True}
+    session.add(approval)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        approval = (await session.execute(
+            select(PendingApproval).where(PendingApproval.idempotency_key == idempotency_key)
+        )).scalar_one()
+
+    await AuditLogService(session).log(
+        event_type="document.deletion_requested", action="request_delete", outcome="success",
+        user_id=principal.user_id, resource_type="document", resource_id=str(document_id),
+        payload={"reason": reason},
+    )
+    return {"approval_id": str(approval.id), "status": approval.status.value}

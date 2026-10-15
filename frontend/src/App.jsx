@@ -124,6 +124,8 @@ function Chat({ me, onLogout }) {
         else if (evt.event === 'answer_chunk') {
           assistantContent += evt.data.delta
           updateAssistant({ content: assistantContent, pending: false })
+        } else if (evt.event === 'awaiting_approval') {
+          updateAssistant({ content: `Awaiting approval: ${evt.data.summary}`, pending: false })
         }
       }
     } catch (e) {
@@ -190,6 +192,9 @@ function Chat({ me, onLogout }) {
           <strong>{me.full_name}</strong>
           <span>{me.user_type}{me.department ? ` · ${me.department}` : ''}</span>
         </div>
+        {me.user_type !== 'customer' && (
+          <button className="secondary" onClick={() => nav('/approvals')}>Pending approvals</button>
+        )}
         <button className="primary" onClick={newSession}>+ New chat</button>
         <ul className="sessions">
           {sessions.map((s) => (
@@ -278,6 +283,84 @@ function Chat({ me, onLogout }) {
   )
 }
 
+// --- Approvals ---
+
+const ACTION_LABELS = {
+  file_claim: 'File claim',
+  request_policy_cancellation: 'Cancel policy',
+  request_policy_change: 'Change coverage',
+  document_deletion: 'Delete document',
+}
+
+function Approvals({ onLogout }) {
+  const nav = useNavigate()
+  const [approvals, setApprovals] = useState([])
+  const [busyId, setBusyId] = useState(null)
+  const [noteById, setNoteById] = useState({})
+  const [error, setError] = useState('')
+
+  const refresh = () => api.listApprovals('pending').then(setApprovals).catch((e) => setError(e.message))
+  useEffect(() => { refresh() }, [])
+
+  const decide = async (id, decision) => {
+    setBusyId(id)
+    setError('')
+    try {
+      await api.decideApproval(id, decision, noteById[id] || undefined)
+      setApprovals((prev) => prev.filter((a) => a.id !== id))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const logout = async () => {
+    await api.logout().catch(() => {})
+    onLogout()
+    nav('/login')
+  }
+
+  return (
+    <div className="approvals-page">
+      <div className="approvals-header">
+        <h1>Pending approvals</h1>
+        <div>
+          <button onClick={() => nav('/chat')}>Back to chat</button>
+          <button className="logout-btn" onClick={logout}>Log out</button>
+        </div>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {approvals.length === 0 ? (
+        <p className="hint">Nothing waiting on you right now.</p>
+      ) : (
+        <ul className="approvals-list">
+          {approvals.map((a) => (
+            <li key={a.id} className="approval-card">
+              <div className="approval-type">{ACTION_LABELS[a.action_type] || a.action_type}</div>
+              <ul className="approval-args">
+                {Object.entries(a.args).map(([k, v]) => (
+                  <li key={k}><code>{k}</code>: {String(v)}</li>
+                ))}
+              </ul>
+              <div className="meta">Requested {new Date(a.created_at).toLocaleString()}</div>
+              <input
+                placeholder="Optional note"
+                value={noteById[a.id] || ''}
+                onChange={(e) => setNoteById((m) => ({ ...m, [a.id]: e.target.value }))}
+              />
+              <div className="approval-actions">
+                <button disabled={busyId === a.id} onClick={() => decide(a.id, 'approve')}>Approve</button>
+                <button disabled={busyId === a.id} onClick={() => decide(a.id, 'reject')}>Reject</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 // --- App shell ---
 
 export default function App() {
@@ -303,6 +386,14 @@ export default function App() {
       <Route
         path="/chat"
         element={me ? <Chat me={me} onLogout={() => setMe(null)} /> : <Navigate to="/login" replace />}
+      />
+      <Route
+        path="/approvals"
+        element={
+          !me ? <Navigate to="/login" replace />
+          : me.user_type === 'customer' ? <Navigate to="/chat" replace />
+          : <Approvals onLogout={() => setMe(null)} />
+        }
       />
       <Route path="*" element={<Navigate to={me ? '/chat' : '/login'} replace />} />
     </Routes>

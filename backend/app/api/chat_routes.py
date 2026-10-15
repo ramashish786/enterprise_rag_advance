@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -15,7 +16,7 @@ from app.agent.graph import InsuranceAgent
 from app.api.deps import _db_session, current_principal
 from app.auth.service import SecurityPrincipal
 from app.core.logging import get_logger
-from app.db.models import ChatMessage, ChatSession
+from app.db.models import ChatMessage, ChatSession, PendingApproval
 from app.memory.long_term import LongTermMemoryService, extract_candidates
 from app.memory.short_term import (
     append_message,
@@ -144,12 +145,21 @@ async def send_message(
     """Runs the agent, persists the exchange, streams SSE events.
 
     Events, in order: "routing" (tools + reasoning), "sources" (retrieved
-    chunks), a run of "answer_chunk" (the final answer sliced up so it
-    streams like a token-by-token reply), then "done" with the message id.
+    chunks), then either a run of "answer_chunk" (the final answer sliced up
+    so it streams like a token-by-token reply) followed by "done", or —
+    if the turn hit a mutating tool that needs sign-off — "awaiting_approval"
+    in place of both, since there's no final answer yet.
     """
     chat = (await session.execute(select(ChatSession).where(ChatSession.id == session_id))).scalar_one_or_none()
     if not chat or chat.user_id != principal.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    agent = InsuranceAgent(session)
+    if await agent.has_pending_turn(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This conversation has a pending approval; resolve it before sending another message.",
+        )
 
     # Persist the user message immediately.
     user_msg = ChatMessage(
@@ -171,7 +181,6 @@ async def send_message(
     state = await stm.get(str(session_id)) or new_state()
 
     async def _event_stream() -> AsyncIterator[dict]:
-        agent = InsuranceAgent(session)
         result = await agent.run(
             payload.content,
             principal,
@@ -179,6 +188,46 @@ async def send_message(
             prior_summary=state.get("summary", ""),
             prior_messages=state.get("messages", []),
         )
+
+        if result.interrupted:
+            pending = result.pending_action
+            approval = PendingApproval(
+                thread_id=session_id,
+                action_type=pending["type"],
+                args=pending["args"],
+                idempotency_key=pending["idempotency_key"],
+                requested_by=principal.user_id,
+            )
+            session.add(approval)
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Same idempotency_key already has a pending row (duplicate
+                # submission) — reuse it rather than creating a second one.
+                await session.rollback()
+                approval = (await session.execute(
+                    select(PendingApproval).where(
+                        PendingApproval.idempotency_key == pending["idempotency_key"]
+                    )
+                )).scalar_one()
+
+            note_msg = ChatMessage(
+                session_id=session_id, role="assistant",
+                content=f"Awaiting approval: {pending['summary']}",
+                metadata_={"pending_approval_id": str(approval.id), "action_type": pending["type"]},
+            )
+            session.add(note_msg)
+            await session.commit()
+
+            state2 = append_message(state, "user", payload.content)
+            await stm.put(str(session_id), state2)
+
+            yield {"event": "awaiting_approval", "data": json.dumps({
+                "approval_id": str(approval.id),
+                "action_type": pending["type"],
+                "summary": pending["summary"],
+            })}
+            return
 
         yield {"event": "routing", "data": json.dumps({
             "tools": result.routing.tools if result.routing else [],

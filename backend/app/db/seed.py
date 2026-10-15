@@ -44,10 +44,18 @@ PERMISSIONS = [
     ("document", "read_restricted","Read restricted documents"),
     ("document", "upload",        "Upload knowledge base documents"),
     ("document", "delete",        "Delete knowledge base documents"),
+    ("document", "approve_deletion", "Confirm a document deletion requested by another admin"),
     # chat
     ("chat", "create_session",    "Create chat sessions"),
     ("chat", "read_own_history",  "Read own chat history"),
     ("chat", "read_any_history",  "Read any chat history"),
+    # claims / policy mutations (human-in-the-loop approval flows)
+    ("claim", "file",              "File an insurance claim"),
+    ("claim", "approve",           "Approve or reject filed claims"),
+    ("policy", "request_cancellation", "Request cancellation of an own policy"),
+    ("policy", "approve_cancellation", "Approve or reject policy cancellation requests"),
+    ("policy", "request_change",   "Request a coverage change on an own policy"),
+    ("policy", "approve_change",   "Approve or reject policy change requests"),
     # user management
     ("user", "manage",            "Create/update/delete users"),
     ("role", "assign",            "Assign roles"),
@@ -61,6 +69,9 @@ ROLE_PERMISSIONS = {
         ("document", "read_public"),
         ("chat", "create_session"),
         ("chat", "read_own_history"),
+        ("claim", "file"),
+        ("policy", "request_cancellation"),
+        ("policy", "request_change"),
     ],
     "employee": [
         ("policy", "read_department"),
@@ -68,6 +79,9 @@ ROLE_PERMISSIONS = {
         ("document", "read_internal"),
         ("chat", "create_session"),
         ("chat", "read_own_history"),
+        ("claim", "approve"),
+        ("policy", "approve_cancellation"),
+        ("policy", "approve_change"),
     ],
     "administrator": [(r, a) for (r, a, _) in PERMISSIONS],
 }
